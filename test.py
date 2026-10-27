@@ -126,29 +126,28 @@ def extract_image(path):
 
 
 def extract_ocr_space(path):
-    """Extracts text using OCR.space cloud API and structures it into word tokens."""
+    """Extracts text using OCR.space cloud API and preserves real 2D bounding boxes."""
     from ocr_space_client import OCRSpaceClient
-    client = OCRSpaceClient()
+    client = OCRSpaceClient(timeout=45)
     res = client.parse_path(str(path), ocr_engine=2, is_table=True)
     words = []
-    lines = res["text"].splitlines()
-    for row_idx, line in enumerate(lines):
-        y0 = float(row_idx * 24 + 10)
-        y1 = float(y0 + 16)
-        tokens = [t for t in re.split(r"[\t\s]+", line) if t.strip()]
-        for col_idx, tok in enumerate(tokens):
-            x0 = float(col_idx * 55 + 20)
-            x1 = float(x0 + len(tok) * 9)
-            words.append({
-                "x0": x0, "y0": y0,
-                "x1": x1, "y1": y1,
-                "text": tok.strip(),
-            })
+    for w in res.get("words", []):
+        words.append({
+            "x0": float(w["x"]),
+            "y0": float(w["y"]),
+            "x1": float(w["x"] + w["width"]),
+            "y1": float(w["y"] + w["height"]),
+            "text": str(w["text"]).strip(),
+        })
+    max_x = max((w["x1"] for w in words), default=1200.0)
+    max_y = max((w["y1"] for w in words), default=800.0)
     return [{
         "page": 1,
-        "width": 1400.0,
-        "height": max(800.0, float(len(lines) * 24 + 100)),
+        "width": max(1200.0, max_x + 50.0),
+        "height": max(800.0, max_y + 50.0),
         "words": words,
+        "raw_text": res.get("text", ""),
+        "ocr_result": res,
     }]
 
 
@@ -362,14 +361,13 @@ def main():
             "No text extracted. Try --ocr with local Tesseract installed."
         )
 
-    matches = find_id_matches(pages, staff_id)
     report = {
         "report_version": 1,
         "processing_mode": mode,
         "input_type": path.suffix.lower(),
         "requested_month": month_text,
         "page_count": len(pages),
-        "match_count": len(matches),
+        "match_count": 0,
         "staff_id_value_included": False,
         "status": "needs_review",
         "day_header_found": False,
@@ -385,65 +383,96 @@ def main():
         ],
     }
 
-    if not matches:
-        report["status"] = "id_not_found"
-        report["warnings"].append(
-            "Exact ID token not found. OCR may have misread or split the ID."
+    if mode == "ocr_space_cloud" and "ocr_result" in pages[0]:
+        from table_reconstructor import RosterTableReconstructor
+        reconstructor = RosterTableReconstructor(
+            words=pages[0]["ocr_result"].get("words", []),
+            month_str=month_text,
+            requested_staff_id=staff_id,
         )
-
-    elif len(matches) > 1:
-        report["status"] = "ambiguous_id_match"
-        report["warnings"].append(
-            "ID found in multiple rows/pages. Do not use results until resolved."
-        )
-
+        recon = reconstructor.reconstruct()
+        report["reconstruction"] = recon
+        report["status"] = recon["status"]
+        report["staff_name"] = recon.get("staff_name")
+        report["matched_id"] = recon.get("matched_staff_id")
+        report["floor"] = recon.get("floor_department")
+        report["warnings"].extend(recon.get("warnings", []))
+        report["match_count"] = 1 if recon.get("matched_staff_id") else 0
+        report["extracted_shifts"] = [
+            {
+                "date": e["date"],
+                "code": e["raw_value"],
+                "meaning": e["normalized_shift"],
+                "floor": e["floor"],
+                "status": e["status"],
+                "provenance": e["provenance"],
+            }
+            for e in recon.get("entries", [])
+        ]
+        if recon.get("matched_staff_id"):
+            report["day_header_found"] = True
+            report["detected_day_count"] = len(recon.get("entries", []))
     else:
-        match = matches[0]
-        print(
-            "\nLOCAL PREVIEW — may contain sensitive data; "
-            "do not share this terminal output:"
-        )
-        print(" | ".join(w["text"] for w in match["row"]["words"]))
+        matches = find_id_matches(pages, staff_id)
+        report["match_count"] = len(matches)
 
-        header = detect_day_header(match["rows"])
-
-        if not header:
-            report["status"] = "id_found_header_not_detected"
+        if not matches:
+            report["status"] = "id_not_found"
             report["warnings"].append(
-                "ID found, but day-number header was not detected "
-                "on the same page."
+                "Exact ID token not found. OCR may have misread or split the ID."
+            )
+        elif len(matches) > 1:
+            report["status"] = "ambiguous_id_match"
+            report["warnings"].append(
+                "ID found in multiple rows/pages. Do not use results until resolved."
             )
         else:
-            report["day_header_found"] = True
-            positions = header["positions"]
-            report["detected_day_count"] = len(positions)
-            report["detected_header_days"] = sorted(positions)
-            codes = extract_shift_codes(
-                match["row"], positions, staff_id
+            match = matches[0]
+            print(
+                "\nLOCAL PREVIEW — may contain sensitive data; "
+                "do not share this terminal output:"
             )
+            print(" | ".join(w["text"] for w in match["row"]["words"]))
 
-            for day in range(1, calendar.monthrange(year, month)[1] + 1):
-                code = codes.get(day)
-                if code is None:
-                    report["extracted_shifts"].append({
-                        "date": date(year, month, day).isoformat(),
-                        "code": None,
-                        "meaning": None,
-                        "status": "missing_or_ambiguous",
-                    })
-                    report["warnings"].append(
-                        f"Day {day}: missing, unreadable, or ambiguous. "
-                        "Not assumed to be OFF."
-                    )
-                else:
-                    report["extracted_shifts"].append({
-                        "date": date(year, month, day).isoformat(),
-                        "code": code,
-                        "meaning": SHIFT_MAP[code],
-                        "status": "needs_human_confirmation",
-                    })
+            header = detect_day_header(match["rows"])
 
-            report["status"] = "extraction_complete_needs_review"
+            if not header:
+                report["status"] = "id_found_header_not_detected"
+                report["warnings"].append(
+                    "ID found, but day-number header was not detected "
+                    "on the same page."
+                )
+            else:
+                report["day_header_found"] = True
+                positions = header["positions"]
+                report["detected_day_count"] = len(positions)
+                report["detected_header_days"] = sorted(positions)
+                codes = extract_shift_codes(
+                    match["row"], positions, staff_id
+                )
+
+                for day in range(1, calendar.monthrange(year, month)[1] + 1):
+                    code = codes.get(day)
+                    if code is None:
+                        report["extracted_shifts"].append({
+                            "date": date(year, month, day).isoformat(),
+                            "code": None,
+                            "meaning": None,
+                            "status": "missing_or_ambiguous",
+                        })
+                        report["warnings"].append(
+                            f"Day {day}: missing, unreadable, or ambiguous. "
+                            "Not assumed to be OFF."
+                        )
+                    else:
+                        report["extracted_shifts"].append({
+                            "date": date(year, month, day).isoformat(),
+                            "code": code,
+                            "meaning": SHIFT_MAP[code],
+                            "status": "needs_human_confirmation",
+                        })
+
+                report["status"] = "extraction_complete_needs_review"
 
     Path(args.output).expanduser().write_text(
         json.dumps(report, indent=2), encoding="utf-8"

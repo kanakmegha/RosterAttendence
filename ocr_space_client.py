@@ -151,7 +151,7 @@ class OCRSpaceClient:
         data = {
             "apikey": self.api_key,
             "language": language,
-            "isOverlayRequired": "false",
+            "isOverlayRequired": "true",
             "OCREngine": str(ocr_engine),
             "isTable": str(is_table).lower(),
             "scale": str(scale).lower(),
@@ -208,6 +208,7 @@ class OCRSpaceClient:
 
         pages_output: List[Dict[str, Any]] = []
         combined_texts: List[str] = []
+        all_words: List[Dict[str, Any]] = []
 
         for idx, page in enumerate(parsed_results, start=1):
             page_text = page.get("ParsedText", "").strip()
@@ -219,10 +220,36 @@ class OCRSpaceClient:
                 if exit_code not in (1, None):
                     raise OCRSpaceAPIError(f"OCR.space error on page {idx}: {page_error}")
 
+            # Extract 2D word bounding boxes from TextOverlay
+            overlay = page.get("TextOverlay") or {}
+            page_words = []
+            for line in overlay.get("Lines", []):
+                for w in line.get("Words", []):
+                    w_text = str(w.get("WordText", "")).strip()
+                    if not w_text:
+                        continue
+                    left = float(w.get("Left", 0))
+                    top = float(w.get("Top", 0))
+                    width = float(w.get("Width", 0))
+                    height = float(w.get("Height", 0))
+                    word_obj = {
+                        "text": w_text,
+                        "x": left,
+                        "y": top,
+                        "width": width,
+                        "height": height,
+                        "cx": left + width / 2.0,
+                        "cy": top + height / 2.0,
+                        "page": idx,
+                    }
+                    page_words.append(word_obj)
+                    all_words.append(word_obj)
+
             pages_output.append({
                 "page_number": idx,
                 "text": page_text,
                 "exit_code": exit_code,
+                "words": page_words,
             })
             if page_text:
                 combined_texts.append(page_text)
@@ -248,6 +275,7 @@ class OCRSpaceClient:
             "provider": "ocr.space",
             "text": full_text,
             "pages": pages_output,
+            "words": all_words,
             "metadata": {
                 "filename": filename,
                 "file_type": ext.lstrip("."),

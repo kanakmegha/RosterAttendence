@@ -1,10 +1,10 @@
 """
-Flask Backend & OCR Test Server for Medical Staff Schedule Tracker.
+Flask Backend & OCR Table Reconstruction Server for Medical Staff Schedule Tracker.
 
 Provides:
-- POST /api/ocr/test: Upload endpoint returning OCR.space extraction.
+- POST /api/ocr/test: Upload endpoint returning OCR extraction + reconstructed 2D table schedule.
 - GET  /api/health: Healthcheck and configuration status (never leaks API key).
-- GET  /: Test interface for uploading, previewing, and validating roster OCR.
+- GET  /: Web interface for uploading, previewing, and validating roster table reconstruction.
 """
 
 import os
@@ -18,9 +18,9 @@ from ocr_space_client import (
     OCRSpaceValidationError,
     OCRSpaceAPIError,
 )
+from table_reconstructor import RosterTableReconstructor
 
 app = Flask(__name__)
-# Maximum upload payload allowed by Flask: 10MB (client still enforces 1MB OCR.space limit)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 
@@ -29,10 +29,10 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Medical Staff Roster OCR Tester — OCR.space</title>
+  <title>Medical Staff Roster Table Reconstruction — OCR.space</title>
   <style>
     :root {
-      --bg: #0f172a;
+      --bg: #0b1120;
       --card-bg: #1e293b;
       --card-border: #334155;
       --text: #f8fafc;
@@ -63,7 +63,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     .container {
-      max-width: 960px;
+      max-width: 1020px;
       margin: 0 auto;
       width: 100%;
     }
@@ -74,7 +74,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     header h1 {
-      font-size: 2rem;
+      font-size: 2.1rem;
       font-weight: 700;
       background: linear-gradient(135deg, #38bdf8, #818cf8);
       -webkit-background-clip: text;
@@ -177,13 +177,6 @@ HTML_PAGE = """<!DOCTYPE html>
       font-size: 0.9rem;
     }
 
-    .toggle-group {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-top: 0.3rem;
-    }
-
     .btn {
       background: var(--primary);
       color: #0f172a;
@@ -217,6 +210,9 @@ HTML_PAGE = """<!DOCTYPE html>
       width: auto;
       padding: 0.4rem 0.8rem;
       font-size: 0.85rem;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      cursor: pointer;
     }
 
     .btn-secondary:hover:not(:disabled) {
@@ -238,10 +234,10 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #fca5a5;
     }
 
-    .alert-info {
-      background: rgba(56, 189, 248, 0.15);
-      border: 1px solid var(--primary);
-      color: #7dd3fc;
+    .alert-warning {
+      background: rgba(251, 191, 36, 0.15);
+      border: 1px solid var(--warning);
+      color: #fde68a;
     }
 
     .spinner {
@@ -262,13 +258,13 @@ HTML_PAGE = """<!DOCTYPE html>
       display: flex;
       flex-wrap: wrap;
       gap: 0.5rem;
-      margin-bottom: 1rem;
+      margin-bottom: 1.25rem;
     }
 
     .chip {
       background: #334155;
       color: var(--text);
-      padding: 0.3rem 0.75rem;
+      padding: 0.35rem 0.75rem;
       border-radius: 20px;
       font-size: 0.8rem;
       font-weight: 500;
@@ -280,12 +276,124 @@ HTML_PAGE = """<!DOCTYPE html>
       border: 1px solid rgba(52, 211, 153, 0.4);
     }
 
-    .preview-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 1rem;
+    .chip-warning {
+      background: rgba(251, 191, 36, 0.2);
+      color: var(--warning);
+      border: 1px solid rgba(251, 191, 36, 0.4);
     }
+
+    .emp-card {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.25rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+    }
+
+    .emp-item {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .emp-item span.label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+
+    .emp-item span.val {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .view-tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 0.5rem;
+    }
+
+    .view-tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 0.5rem 1rem;
+      cursor: pointer;
+      border-radius: 6px;
+    }
+
+    .view-tab-btn.active {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--primary);
+    }
+
+    .schedule-table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+    }
+
+    table.schedule-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.88rem;
+    }
+
+    table.schedule-table th {
+      background: #0f172a;
+      color: var(--text-muted);
+      padding: 0.75rem 1rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    table.schedule-table td {
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+    }
+
+    table.schedule-table tr:hover {
+      background: rgba(56, 189, 248, 0.03);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .badge-morning { background: rgba(56, 189, 248, 0.2); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); }
+    .badge-evening { background: rgba(251, 191, 36, 0.2); color: #fde68a; border: 1px solid rgba(251, 191, 36, 0.3); }
+    .badge-night   { background: rgba(129, 140, 248, 0.2); color: #c7d2fe; border: 1px solid rgba(129, 140, 248, 0.3); }
+    .badge-off     { background: rgba(52, 211, 153, 0.2); color: #a7f3d0; border: 1px solid rgba(52, 211, 153, 0.3); }
+    .badge-absent  { background: rgba(248, 113, 113, 0.2); color: #fca5a5; border: 1px solid rgba(248, 113, 113, 0.3); }
+    .badge-missing { background: rgba(148, 163, 184, 0.1); color: #64748b; }
+
+    .status-pill {
+      font-size: 0.75rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 12px;
+      display: inline-block;
+    }
+
+    .status-confirmed { background: rgba(52, 211, 153, 0.2); color: var(--success); }
+    .status-review    { background: rgba(251, 191, 36, 0.2); color: var(--warning); }
+    .status-missing   { background: rgba(148, 163, 184, 0.15); color: var(--text-muted); }
 
     .preview-box {
       background: var(--code-bg);
@@ -302,30 +410,6 @@ HTML_PAGE = """<!DOCTYPE html>
       line-height: 1.6;
     }
 
-    .pages-tabs {
-      display: flex;
-      gap: 0.5rem;
-      margin-bottom: 0.75rem;
-      overflow-x: auto;
-    }
-
-    .tab-btn {
-      background: #1e293b;
-      border: 1px solid var(--card-border);
-      color: var(--text-muted);
-      padding: 0.4rem 0.8rem;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 0.85rem;
-    }
-
-    .tab-btn.active {
-      background: var(--primary);
-      color: #0f172a;
-      border-color: var(--primary);
-      font-weight: 600;
-    }
-
     footer {
       margin-top: auto;
       text-align: center;
@@ -339,10 +423,11 @@ HTML_PAGE = """<!DOCTYPE html>
   <div class="container">
     <header>
       <h1>Medical Staff Schedule Tracker</h1>
-      <p>OCR.space Cloud API Testing & Text Extraction Workbench</p>
+      <p>Roster Table Reconstruction & Calendar Schedule Extractor</p>
     </header>
 
     <div id="errorAlert" class="alert alert-error"></div>
+    <div id="warningAlert" class="alert alert-warning"></div>
 
     <div class="card">
       <div id="dropzone" class="dropzone">
@@ -350,7 +435,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
         </svg>
         <p>Click or drag & drop roster image or PDF here</p>
-        <p class="subtext">Supports JPG, JPEG, PNG, or PDF &bull; Max 1 MB &bull; PDFs max 3 pages (Free Tier)</p>
+        <p class="subtext">Supports JPG, PNG, PDF &bull; Max 1 MB &bull; PDFs max 3 pages</p>
         <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf">
       </div>
 
@@ -361,54 +446,72 @@ HTML_PAGE = """<!DOCTYPE html>
 
       <div class="options-grid">
         <div class="option-item">
+          <label for="staffId">Staff ID</label>
+          <input type="text" id="staffId" placeholder="e.g. ABHL341" value="ABHL341">
+        </div>
+        <div class="option-item">
+          <label for="rosterMonth">Roster Month (YYYY-MM)</label>
+          <input type="text" id="rosterMonth" placeholder="e.g. 2026-09" value="2026-09">
+        </div>
+        <div class="option-item">
           <label for="ocrEngine">OCR Engine</label>
           <select id="ocrEngine">
-            <option value="2" selected>Engine 2 (Best for tables/numbers)</option>
-            <option value="1">Engine 1 (Standard engine)</option>
+            <option value="2" selected>Engine 2 (Tables/Numbers)</option>
+            <option value="1">Engine 1 (Standard)</option>
           </select>
         </div>
         <div class="option-item">
-          <label for="isTable">Table Parsing Mode</label>
+          <label for="isTable">Table Mode</label>
           <select id="isTable">
             <option value="true" selected>Enabled (isTable=true)</option>
-            <option value="false">Disabled (plain text)</option>
-          </select>
-        </div>
-        <div class="option-item">
-          <label for="scale">Scale Enhancement</label>
-          <select id="scale">
-            <option value="true" selected>True (low-res boost)</option>
-            <option value="false">False</option>
-          </select>
-        </div>
-        <div class="option-item">
-          <label for="language">Language</label>
-          <select id="language">
-            <option value="eng" selected>English (eng)</option>
+            <option value="false">Disabled</option>
           </select>
         </div>
       </div>
 
       <button id="extractBtn" class="btn" disabled>
-        <span id="btnText">Extract Roster Text</span>
+        <span id="btnText">Reconstruct & Extract Schedule</span>
       </button>
     </div>
 
     <div id="resultCard" class="card" style="display: none;">
-      <div class="preview-header">
-        <h2>Extracted Text Preview</h2>
-        <button id="copyBtn" class="btn-secondary">Copy Text</button>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2 id="resultTitle">Reconstructed Schedule</h2>
+        <button id="copyJsonBtn" class="btn-secondary">Copy JSON</button>
       </div>
 
       <div id="metaChips" class="meta-chips"></div>
 
-      <div id="pagesTabs" class="pages-tabs" style="display: none;"></div>
+      <div id="empCard" class="emp-card" style="display: none;"></div>
 
-      <div id="previewBox" class="preview-box"></div>
+      <div class="view-tabs">
+        <button id="tabScheduleBtn" class="view-tab-btn active" onclick="switchView('schedule')">Calendar Duties</button>
+        <button id="tabRawBtn" class="view-tab-btn" onclick="switchView('raw')">Raw OCR Text</button>
+      </div>
+
+      <div id="scheduleView" class="schedule-table-wrap">
+        <table class="schedule-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Weekday</th>
+              <th>Shift</th>
+              <th>Floor / Dept</th>
+              <th>Status</th>
+              <th>Source Provenance</th>
+            </tr>
+          </thead>
+          <tbody id="scheduleBody"></tbody>
+        </table>
+      </div>
+
+      <div id="rawView" style="display: none;">
+        <div id="previewBox" class="preview-box"></div>
+      </div>
     </div>
 
     <footer>
-      Medical Staff Schedule Tracker &bull; Local & Cloud OCR Verification &bull; API Key Protected Server-Side
+      Medical Staff Schedule Tracker &bull; 2D Geometry Table Reconstruction &bull; Privacy-Safe Local Execution
     </footer>
   </div>
 
@@ -421,33 +524,28 @@ HTML_PAGE = """<!DOCTYPE html>
     const extractBtn = document.getElementById('extractBtn');
     const btnText = document.getElementById('btnText');
     const errorAlert = document.getElementById('errorAlert');
+    const warningAlert = document.getElementById('warningAlert');
     const resultCard = document.getElementById('resultCard');
-    const previewBox = document.getElementById('previewBox');
+    const empCard = document.getElementById('empCard');
     const metaChips = document.getElementById('metaChips');
-    const pagesTabs = document.getElementById('pagesTabs');
-    const copyBtn = document.getElementById('copyBtn');
+    const scheduleBody = document.getElementById('scheduleBody');
+    const previewBox = document.getElementById('previewBox');
+    const copyJsonBtn = document.getElementById('copyJsonBtn');
 
     let currentFile = null;
-    let currentResponse = null;
+    let currentData = null;
 
     dropzone.addEventListener('click', () => fileInput.click());
-    dropzone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropzone.classList.add('dragover');
-    });
+    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
     dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
     dropzone.addEventListener('drop', (e) => {
       e.preventDefault();
       dropzone.classList.remove('dragover');
-      if (e.dataTransfer.files.length > 0) {
-        handleFileSelect(e.dataTransfer.files[0]);
-      }
+      if (e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files[0]);
     });
 
     fileInput.addEventListener('change', () => {
-      if (fileInput.files.length > 0) {
-        handleFileSelect(fileInput.files[0]);
-      }
+      if (fileInput.files.length > 0) handleFileSelect(fileInput.files[0]);
     });
 
     clearFileBtn.addEventListener('click', () => {
@@ -456,7 +554,7 @@ HTML_PAGE = """<!DOCTYPE html>
       dropzone.style.display = 'block';
       selectedFileInfo.style.display = 'none';
       extractBtn.disabled = true;
-      hideError();
+      hideAlerts();
     });
 
     function showError(msg) {
@@ -465,19 +563,24 @@ HTML_PAGE = """<!DOCTYPE html>
       errorAlert.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
-    function hideError() {
+    function showWarning(msg) {
+      warningAlert.innerHTML = `<strong>Attention Required:</strong> ${escapeHtml(msg)}`;
+      warningAlert.style.display = 'block';
+    }
+
+    function hideAlerts() {
       errorAlert.style.display = 'none';
-      errorAlert.textContent = '';
+      warningAlert.style.display = 'none';
     }
 
     function escapeHtml(str) {
-      return String(str).replace(/[&<>"']/g, (m) => ({
+      return String(str || '').replace(/[&<>"']/g, (m) => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       }[m]));
     }
 
     function handleFileSelect(file) {
-      hideError();
+      hideAlerts();
       const ext = '.' + file.name.split('.').pop().toLowerCase();
       const allowed = ['.jpg', '.jpeg', '.png', '.pdf'];
       if (!allowed.includes(ext)) {
@@ -487,7 +590,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
       const sizeMB = (file.size / (1024 * 1024)).toFixed(2);
       if (file.size > 1024 * 1024) {
-        showError(`File size (${sizeMB} MB) exceeds OCR.space free tier limit of 1 MB (1024 KB). Please compress or crop.`);
+        showError(`File size (${sizeMB} MB) exceeds OCR.space free tier limit of 1 MB. Please compress or crop.`);
         return;
       }
 
@@ -501,16 +604,16 @@ HTML_PAGE = """<!DOCTYPE html>
     extractBtn.addEventListener('click', async () => {
       if (!currentFile) return;
 
-      hideError();
+      hideAlerts();
       extractBtn.disabled = true;
-      btnText.innerHTML = `<span class="spinner"></span> Processing document with OCR.space...`;
+      btnText.innerHTML = `<span class="spinner"></span> Reconstructing table & extracting duties...`;
 
       const formData = new FormData();
       formData.append('file', currentFile);
+      formData.append('staff_id', document.getElementById('staffId').value);
+      formData.append('month', document.getElementById('rosterMonth').value);
       formData.append('ocr_engine', document.getElementById('ocrEngine').value);
       formData.append('is_table', document.getElementById('isTable').value);
-      formData.append('scale', document.getElementById('scale').value);
-      formData.append('language', document.getElementById('language').value);
 
       try {
         const res = await fetch('/api/ocr/test', {
@@ -523,66 +626,93 @@ HTML_PAGE = """<!DOCTYPE html>
           throw new Error(data.error || `HTTP ${res.status}: Failed to extract text`);
         }
 
-        currentResponse = data;
+        currentData = data;
         renderResults(data);
       } catch (err) {
         showError(err.message || 'Unknown network error occurred');
       } finally {
         extractBtn.disabled = false;
-        btnText.textContent = 'Extract Roster Text';
+        btnText.textContent = 'Reconstruct & Extract Schedule';
       }
     });
 
     function renderResults(data) {
       resultCard.style.display = 'block';
+      const recon = data.reconstruction || {};
 
-      // Render meta chips
-      metaChips.innerHTML = `
-        <span class="chip chip-success">&#10003; Status: Ready</span>
-        <span class="chip">Provider: ${escapeHtml(data.provider)}</span>
-        <span class="chip">Pages: ${data.metadata.page_count}</span>
-        <span class="chip">Duration: ${data.metadata.processing_time_ms} ms</span>
-        <span class="chip">Engine: ${data.metadata.ocr_engine}</span>
-        <span class="chip">Table Mode: ${data.metadata.is_table}</span>
-      `;
-
-      // Render page tabs if multi-page
-      if (data.pages && data.pages.length > 1) {
-        pagesTabs.style.display = 'flex';
-        pagesTabs.innerHTML = `
-          <button class="tab-btn active" onclick="showTab(-1)">Combined All Pages</button>
-          ${data.pages.map((p, i) => `<button class="tab-btn" onclick="showTab(${i})">Page ${p.page_number}</button>`).join('')}
-        `;
-      } else {
-        pagesTabs.style.display = 'none';
-        pagesTabs.innerHTML = '';
+      if (recon.warnings && recon.warnings.length > 0) {
+        showWarning(recon.warnings.join('<br>'));
       }
 
+      // Meta chips
+      const statusClass = recon.status === 'confirmed' ? 'chip-success' : 'chip-warning';
+      metaChips.innerHTML = `
+        <span class="chip ${statusClass}">Status: ${recon.status || 'Extracted'}</span>
+        <span class="chip">Provider: ${escapeHtml(data.provider)}</span>
+        <span class="chip">Month: ${recon.roster_month || 'N/A'}</span>
+        <span class="chip">Tokens: ${data.metadata?.words_count || 0}</span>
+        <span class="chip">Duration: ${data.metadata?.processing_time_ms || 0} ms</span>
+      `;
+
+      // Employee summary
+      if (recon.staff_name || recon.matched_staff_id) {
+        empCard.style.display = 'grid';
+        empCard.innerHTML = `
+          <div class="emp-item"><span class="label">Staff Name</span><span class="val">${escapeHtml(recon.staff_name || 'N/A')}</span></div>
+          <div class="emp-item"><span class="label">Matched ID</span><span class="val">${escapeHtml(recon.matched_staff_id || 'N/A')}</span></div>
+          <div class="emp-item"><span class="label">Floor / Department</span><span class="val">${escapeHtml(recon.floor_department || 'N/A')}</span></div>
+          <div class="emp-item"><span class="label">Weekly Off Day</span><span class="val">${escapeHtml(recon.weekly_off_day || 'N/A')}</span></div>
+        `;
+      } else {
+        empCard.style.display = 'none';
+      }
+
+      // Render table
+      const entries = recon.entries || [];
+      scheduleBody.innerHTML = entries.map(e => {
+        let badgeClass = 'badge-missing';
+        if (e.normalized_shift === 'Morning') badgeClass = 'badge-morning';
+        else if (e.normalized_shift === 'Evening') badgeClass = 'badge-evening';
+        else if (e.normalized_shift === 'Night') badgeClass = 'badge-night';
+        else if (e.normalized_shift === 'Off') badgeClass = 'badge-off';
+        else if (e.normalized_shift === 'Absent/Duty') badgeClass = 'badge-absent';
+
+        const shiftDisplay = e.normalized_shift ? `<span class="badge ${badgeClass}">${e.normalized_shift} (${escapeHtml(e.raw_value)})</span>` : '<span class="badge badge-missing">Missing / Unobserved</span>';
+        const statusClass = e.status === 'confirmed' ? 'status-confirmed' : (e.status === 'needs_review' ? 'status-review' : 'status-missing');
+
+        return `
+          <tr>
+            <td><strong>${e.date}</strong></td>
+            <td>${e.weekday}</td>
+            <td>${shiftDisplay}</td>
+            <td>${escapeHtml(e.floor || '-')}</td>
+            <td><span class="status-pill ${statusClass}">${e.status}</span></td>
+            <td><small style="color: var(--text-muted);">${escapeHtml(e.provenance || '-')}</small></td>
+          </tr>
+        `;
+      }).join('');
+
       previewBox.textContent = data.text;
+      switchView('schedule');
       resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
-    window.showTab = function(idx) {
-      const tabs = pagesTabs.querySelectorAll('.tab-btn');
-      tabs.forEach((t, i) => {
-        t.classList.toggle('active', (idx === -1 && i === 0) || (idx === i - 1));
-      });
-
-      if (idx === -1) {
-        previewBox.textContent = currentResponse.text;
-      } else {
-        previewBox.textContent = currentResponse.pages[idx].text || '(No text on this page)';
-      }
+    window.switchView = function(view) {
+      document.getElementById('scheduleView').style.display = view === 'schedule' ? 'block' : 'none';
+      document.getElementById('rawView').style.display = view === 'raw' ? 'block' : 'none';
+      document.getElementById('tabScheduleBtn').classList.toggle('active', view === 'schedule');
+      document.getElementById('tabRawBtn').classList.toggle('active', view === 'raw');
     };
 
-    copyBtn.addEventListener('click', async () => {
+    copyJsonBtn.addEventListener('click', async () => {
+      if (!currentData) return;
       try {
-        await navigator.clipboard.writeText(previewBox.textContent);
-        const originalText = copyBtn.textContent;
-        copyBtn.textContent = 'Copied!';
-        setTimeout(() => { copyBtn.textContent = originalText; }, 2000);
+        await navigator.clipboard.writeText(JSON.stringify(currentData.reconstruction, null, 2));
+        const originalText = copyJsonBtn.textContent;
+        copyJsonBtn.textContent = 'JSON Copied!';
+        setTimeout(() => { copyJsonBtn.textContent = originalText; }, 2000);
       } catch (e) {
-        alert('Failed to copy to clipboard');
+        alert('Failed to copy JSON');
       }
     });
   </script>
@@ -593,7 +723,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
 @app.route("/", methods=["GET"])
 def index():
-    """Serves the test UI for roster OCR testing."""
+    """Serves the test UI for roster table reconstruction."""
     return render_template_string(HTML_PAGE)
 
 
@@ -612,8 +742,8 @@ def health():
 @app.route("/api/ocr/test", methods=["POST"])
 def ocr_test():
     """
-    Dedicated endpoint for testing OCR.space extraction from uploaded documents.
-    Accepts multipart/form-data with 'file'.
+    Dedicated endpoint for testing OCR.space extraction and 2D table reconstruction.
+    Accepts multipart/form-data with 'file', optional 'staff_id', and optional 'month'.
     """
     if "file" not in request.files:
         return jsonify({
@@ -631,13 +761,15 @@ def ocr_test():
         }), 400
 
     # Read parameters
+    staff_id = request.form.get("staff_id", "").strip() or None
+    month = request.form.get("month", "").strip() or None
     ocr_engine = int(request.form.get("ocr_engine", 2))
     is_table = request.form.get("is_table", "true").lower() in ("true", "1", "yes")
     scale = request.form.get("scale", "true").lower() in ("true", "1", "yes")
     language = request.form.get("language", "eng")
 
     try:
-        client = OCRSpaceClient()
+        client = OCRSpaceClient(timeout=45)
     except OCRSpaceConfigError as exc:
         return jsonify({
             "success": False,
@@ -655,6 +787,19 @@ def ocr_test():
             scale=scale,
             language=language,
         )
+
+        # Execute 2D Table Reconstruction
+        reconstructor = RosterTableReconstructor(
+            words=result.get("words", []),
+            month_str=month,
+            requested_staff_id=staff_id,
+        )
+        reconstruction = reconstructor.reconstruct()
+
+        result["reconstruction"] = reconstruction
+        if "metadata" in result:
+            result["metadata"]["words_count"] = len(result.get("words", []))
+
         return jsonify(result), 200
 
     except OCRSpaceValidationError as exc:
