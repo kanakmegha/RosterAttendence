@@ -14,7 +14,7 @@ from datetime import date
 try:
     import fitz
 except ImportError:
-    sys.exit("Install PyMuPDF: python3 -m pip install pymupdf")
+    fitz = None
 
 SHIFT_MAP = {"M": "Morning", "E": "Evening", "N": "Night", "OFF": "Off"}
 
@@ -123,6 +123,34 @@ def extract_image(path):
         "height": float(image.height),
         "words": words,
     }]
+
+
+def extract_ocr_space(path):
+    """Extracts text using OCR.space cloud API and structures it into word tokens."""
+    from ocr_space_client import OCRSpaceClient
+    client = OCRSpaceClient()
+    res = client.parse_path(str(path), ocr_engine=2, is_table=True)
+    words = []
+    lines = res["text"].splitlines()
+    for row_idx, line in enumerate(lines):
+        y0 = float(row_idx * 24 + 10)
+        y1 = float(y0 + 16)
+        tokens = [t for t in re.split(r"[\t\s]+", line) if t.strip()]
+        for col_idx, tok in enumerate(tokens):
+            x0 = float(col_idx * 55 + 20)
+            x1 = float(x0 + len(tok) * 9)
+            words.append({
+                "x0": x0, "y0": y0,
+                "x1": x1, "y1": y1,
+                "text": tok.strip(),
+            })
+    return [{
+        "page": 1,
+        "width": 1400.0,
+        "height": max(800.0, float(len(lines) * 24 + 100)),
+        "words": words,
+    }]
+
 
 
 def extract_scanned_pdf(path):
@@ -268,6 +296,10 @@ def main():
         "--ocr", action="store_true",
         help="Use local OCR for scanned PDFs or images",
     )
+    parser.add_argument(
+        "--ocr-space", action="store_true",
+        help="Use OCR.space cloud API for text extraction",
+    )
     args = parser.parse_args()
 
     path = Path(args.file).expanduser()
@@ -290,22 +322,34 @@ def main():
         parser.error("Month must be between 01 and 12.")
 
     try:
-        if path.suffix.lower() == ".pdf":
-            pages = extract_pdf(path)
-            mode = "pdf_text"
-
-            word_count = sum(len(page["words"]) for page in pages)
-            if word_count < 20 and args.ocr:
-                pages = extract_scanned_pdf(path)
-                mode = "local_ocr"
+        if args.ocr_space:
+            pages = extract_ocr_space(path)
+            mode = "ocr_space_cloud"
+        elif path.suffix.lower() == ".pdf":
+            if fitz is None:
+                pages = extract_ocr_space(path)
+                mode = "ocr_space_cloud"
+            else:
+                pages = extract_pdf(path)
+                mode = "pdf_text"
+                word_count = sum(len(page["words"]) for page in pages)
+                if word_count < 20 and args.ocr:
+                    pages = extract_scanned_pdf(path)
+                    mode = "local_ocr"
 
         elif path.suffix.lower() in {
             ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"
         }:
-            if not args.ocr:
-                parser.error("Images require --ocr.")
-            pages = extract_image(path)
-            mode = "local_ocr"
+            if args.ocr:
+                try:
+                    pages = extract_image(path)
+                    mode = "local_ocr"
+                except Exception:
+                    # Fallback to OCR.space when local Tesseract is missing
+                    pages = extract_ocr_space(path)
+                    mode = "ocr_space_cloud"
+            else:
+                parser.error("Images require --ocr or --ocr-space.")
 
         else:
             parser.error("Supported formats: PDF, PNG, JPG, TIFF, BMP.")
