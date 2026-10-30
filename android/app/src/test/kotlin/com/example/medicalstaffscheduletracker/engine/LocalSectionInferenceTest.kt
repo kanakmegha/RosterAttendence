@@ -331,6 +331,50 @@ class LocalSectionInferenceTest {
     }
 
     @Test
+    fun testClearShiftInUnanchoredColumnCanAnchorSectionButRemainsReviewable() {
+        // Geometry uncertainty must not erase an otherwise clear OCR observation.
+        // The cell remains needs_review, but its exact single-letter token can support
+        // a section pattern. Ambiguous tokens and ID-confusion reviews remain excluded.
+        val cells = (1..30).map { d ->
+            when (d) {
+                15 -> ReconstructedCell(
+                    d, "2026-09-$d", "Tuesday", "N", "Night",
+                    "needs_review", 0.95, "ocr_observed",
+                    "Unanchored date column", "interpolated", "unanchored"
+                )
+                else -> ReconstructedCell(
+                    d, "2026-09-$d", "Day", null, null, "missing",
+                    null, null, null, "num", "high"
+                )
+            }
+        }
+        val recon = TableReconstructionResult(
+            rosterMonth = "2026-09",
+            requestedStaffId = "ABHL341",
+            matchedStaffId = "ABHL341",
+            matchReason = "exact",
+            staffName = "Akash",
+            weeklyOffDay = null,
+            floorDepartment = "Floor 2",
+            status = "confirmed",
+            isConfusableId = false,
+            confusableMessage = null,
+            entries = cells
+        )
+
+        val draft = inferenceEngine.inferSections(recon)
+        val day15 = draft.entries.first { it.dayNumber == 15 }
+        assertEquals("Night", day15.normalizedShift)
+        assertEquals("needs_review", day15.reviewStatus)
+        assertEquals("directly_observed", day15.sourceType)
+
+        val day14 = draft.entries.first { it.dayNumber == 14 }
+        assertEquals("Night", day14.normalizedShift)
+        assertEquals("inferred_from_section_anchor", day14.sourceType)
+        assertEquals("inferred_needs_confirmation", day14.reviewStatus)
+    }
+
+    @Test
     fun testAmbiguousOcrTokenCannotEstablishPattern() {
         // Section 2 has only an ambiguous token "NN" (status = needs_review)
         val cells = (1..30).map { d ->
