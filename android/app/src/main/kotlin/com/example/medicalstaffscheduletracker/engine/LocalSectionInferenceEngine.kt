@@ -490,9 +490,14 @@ class LocalSectionInferenceEngine(
                 val conf = e.confidence
                 val status = e.reviewStatus
 
-                val isAmbiguous = status == "needs_review" ||
-                        raw in listOf("NN", "MM", "MMM") ||
-                        e.reviewReason?.contains("ambiguous", ignoreCase = true) == true
+                // A valid single-letter shift can still be useful section evidence when
+                // the *column geometry* is unanchored. Keep the cell itself in review,
+                // but do not confuse that with an ambiguous OCR character.
+                val geometryOnlyReview = status == "needs_review" &&
+                        e.reviewReason?.contains("Unanchored date column", ignoreCase = true) == true
+                val isAmbiguous = raw in listOf("NN", "MM", "MMM") ||
+                        e.reviewReason?.contains("ambiguous", ignoreCase = true) == true ||
+                        (status == "needs_review" && !geometryOnlyReview)
 
                 if (isAmbiguous) continue
 
@@ -514,9 +519,14 @@ class LocalSectionInferenceEngine(
                 val conf = e.confidence
                 val status = e.reviewStatus
 
-                val isAmbiguous = status == "needs_review" ||
-                        raw in listOf("NN", "MM", "MMM") ||
-                        e.reviewReason?.contains("ambiguous", ignoreCase = true) == true
+                // A valid single-letter shift can still be useful section evidence when
+                // the *column geometry* is unanchored. Keep the cell itself in review,
+                // but do not confuse that with an ambiguous OCR character.
+                val geometryOnlyReview = status == "needs_review" &&
+                        e.reviewReason?.contains("Unanchored date column", ignoreCase = true) == true
+                val isAmbiguous = raw in listOf("NN", "MM", "MMM") ||
+                        e.reviewReason?.contains("ambiguous", ignoreCase = true) == true ||
+                        (status == "needs_review" && !geometryOnlyReview)
 
                 if (isAmbiguous) continue
 
