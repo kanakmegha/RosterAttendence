@@ -1,9 +1,44 @@
-.build/
+# macOS
 .DS_Store
-DerivedData/
-*.xcuserstate
+
+# Android / Gradle
+.gradle/
+**/build/
+**/.idea/
+**/local.properties
+**/*.iml
+*.apk
+*.aab
+captures/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets
 .env
 .env.*
-*.pyc
-__pycache__/
-.pytest_cache/
+!.env.example
+*.pem
+*.key
+*.jks
+*.keystore
+
+# Logs
+*.log
+
+# Temporary diagnostics
+actual_cell_ocr_diagnostic.json
+scratch/
+.build/
+bin/
+android/app/src/androidTest/assets/roster.jpeg

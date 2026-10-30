@@ -3,6 +3,8 @@ import Foundation
 /// Distinguishes entries derived from an uploaded roster from user-entered emergency duties.
 public enum EntrySourceType: String, Codable, Hashable, Sendable {
     case roster
+    case ocrObserved = "ocr_observed"
+    case sectionInference = "section_inference"
     case manualEmergency
 }
 
